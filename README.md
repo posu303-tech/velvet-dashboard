@@ -5,8 +5,10 @@ Live monitoring dashboard for the VELVET-USD pre-market trade setups (brief date
 ## Data sources (public, no API key, no CORS issues)
 
 - **Primary tick stream:** Gate.io WebSocket `spot.tickers` (VELVET_USDT) — updates on every trade, direct browser → exchange (WebSockets are not subject to CORS)
+- **Fallback price feed:** CoinGecko `simple/price` (id `velvet`, sends `Access-Control-Allow-Origin: *`) polled every 10s when the WebSocket is unreachable; the page auto-switches back when the WS recovers
+- **Last resort:** last close from `data/state.json` (5-min cadence)
 - **Candle-derived context (session VWAP, prior-day VWAP, ATR14, volume ratios):** computed by a GitHub Actions workflow every 5 minutes (`scripts/update-data.mjs`) and committed to `data/state.json` on the same origin as the page — the browser just fetches the JSON, so no CORS proxy is needed
-- Gate.io / MEXC REST endpoints do not send CORS headers, which is why they are not called from the page itself
+- Gate.io / MEXC REST endpoints do not send CORS headers, and MEXC's WebSocket rejects cross-origin subscriptions, which is why they are not called from the page itself
 
 ## Live-computed parameters
 

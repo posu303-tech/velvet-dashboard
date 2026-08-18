@@ -4,6 +4,7 @@ const GATE_WS = "wss://api.gateio.ws/ws/v4/";
 const PAIR = "VELVET_USDT";
 const STATE_URL = "data/state.json";
 const STATE_MAX_AGE = 15 * 60 * 1000;
+const CG_URL = "https://api.coingecko.com/api/v3/simple/price?ids=velvet&vs_currencies=usd&include_24hr_change=true";
 
 const BRIEF_VWAP = 0.5275;
 const PRIOR_CLOSE = 0.5771;
@@ -77,7 +78,8 @@ const SETUPS = [
 ];
 
 const state = {
-  last: null, bid: null, ask: null, change24: null, wsOk: false, stateOk: false,
+  last: null, bid: null, ask: null, change24: null,
+  feed: "none", wsFails: 0, cgOk: false,
   sesOpen: null, sesHigh: null, sesLow: null, vwap: null, sesVol: 0,
   priorClose: PRIOR_CLOSE, priorVwap: null, avgVol20: null,
   atrDaily: null, atr1h: null, last1hClose: null,
@@ -134,11 +136,96 @@ async function fetchState() {
     state.last1hClose = d.last1hClose;
     if (Array.isArray(d.spark)) state.candles1m = d.spark;
     state.stateOk = true;
-    state.lastUpdated = new Date();
+    if (state.last === null && d.spark && d.spark.length) {
+      state.last = d.spark[d.spark.length - 1][1];
+      if (state.feed === "none" || state.feed === "state") setFeed("state", "using state.json price");
+    }
   } catch (e) {
     state.stateOk = false;
-    log("state refresh failed: " + e.message, "ev");
+    log("context refresh failed: " + e.message, "ev");
   }
+}
+
+let cgTimer = null, cgBackoff = 10000;
+async function pollCoinGecko() {
+  try {
+    const r = await fetch(CG_URL + "&x=" + Date.now());
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    if (!j.velvet || typeof j.velvet.usd !== "number") throw new Error("no velvet data");
+    state.last = j.velvet.usd;
+    if (typeof j.velvet.usd_24h_change === "number") state.change24 = j.velvet.usd_24h_change;
+    state.bid = null; state.ask = null;
+    cgBackoff = 10000;
+    if (state.feed !== "gate-ws") setFeed("coingecko", "polling every 10s");
+  } catch (e) {
+    cgBackoff = Math.min(cgBackoff * 1.5, 60000);
+    log("coingecko poll failed: " + e.message + " (retry in " + cgBackoff / 1000 + "s)", "ev");
+    if (state.feed === "coingecko") setFeed("state", "coingecko failing — state.json price");
+  }
+  if (state.feed === "coingecko") {
+    cgTimer = setTimeout(pollCoinGecko, cgBackoff);
+  }
+}
+function startCoinGecko() {
+  if (cgTimer) return;
+  log("gate WS unavailable — switching to CoinGecko REST (10s)", "ev");
+  pollCoinGecko();
+}
+function stopCoinGecko() {
+  if (cgTimer) { clearTimeout(cgTimer); cgTimer = null; }
+}
+
+function setFeed(feed, note) {
+  state.feed = feed;
+  log("feed: " + feed + (note ? " — " + note : ""), "ev");
+}
+
+function connectWS() {
+  let ws = null, attempts = 0;
+  const open = () => {
+    attempts++;
+    try { ws = new WebSocket(GATE_WS); } catch (e) {
+      state.wsFails++;
+      if (state.wsFails >= 3) startCoinGecko();
+      return;
+    }
+    ws.onopen = () => {
+      state.wsFails = 0;
+      stopCoinGecko();
+      setFeed("gate-ws", "tick stream live");
+      ws.send(JSON.stringify({ time: Math.floor(Date.now() / 1000), channel: "spot.tickers", event: "subscribe", payload: [PAIR] }));
+    };
+    ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.event === "update" && msg.channel === "spot.tickers") {
+        const r = msg.result;
+        if (r && r.last) {
+          state.last = parseFloat(r.last);
+          if (r.lowest_ask) state.ask = parseFloat(r.lowest_ask);
+          if (r.highest_bid) state.bid = parseFloat(r.highest_bid);
+          if (r.change_percentage !== undefined) state.change24 = parseFloat(r.change_percentage);
+          evaluate();
+        }
+      }
+    };
+    ws.onclose = () => {
+      if (state.feed === "gate-ws") state.wsFails++;
+      if (state.wsFails >= 3) startCoinGecko();
+      setTimeout(open, 3000);
+    };
+    ws.onerror = () => {
+      try { ws.close(); } catch (e) { }
+      if (state.wsFails >= 3) startCoinGecko();
+    };
+  };
+  open();
+  setInterval(() => {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ time: Math.floor(Date.now() / 1000), channel: "spot.ping" }));
+    }
+  }, 30000);
 }
 
 function progressFor(setup, distPct) {
@@ -294,39 +381,6 @@ function beep(freq) {
   } catch (e) { /* audio blocked */ }
 }
 
-function connectWS() {
-  let ws;
-  const open = () => {
-    ws = new WebSocket(GATE_WS);
-    ws.onopen = () => {
-      state.wsOk = true;
-      ws.send(JSON.stringify({ time: Math.floor(Date.now() / 1000), channel: "spot.tickers", event: "subscribe", payload: [PAIR] }));
-    };
-    ws.onmessage = (ev) => {
-      let msg;
-      try { msg = JSON.parse(ev.data); } catch (e) { return; }
-      if (msg.event === "update" && msg.channel === "spot.tickers") {
-        const r = msg.result;
-        if (r && r.last) {
-          state.last = parseFloat(r.last);
-          if (r.lowest_ask) state.ask = parseFloat(r.lowest_ask);
-          if (r.highest_bid) state.bid = parseFloat(r.highest_bid);
-          if (r.change_percentage !== undefined) state.change24 = parseFloat(r.change_percentage);
-          evaluate();
-        }
-      }
-    };
-    ws.onclose = () => { state.wsOk = false; setTimeout(open, 3000); };
-    ws.onerror = () => { try { ws.close(); } catch (e) { } };
-  };
-  open();
-  setInterval(() => {
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ time: Math.floor(Date.now() / 1000), channel: "spot.ping" }));
-    }
-  }, 30000);
-}
-
 function buildSetups() {
   const wrap = $("setups");
   wrap.innerHTML = "";
@@ -369,9 +423,17 @@ $("notifBtn").addEventListener("click", () => {
 });
 
 function setFeedUi() {
-  const wd = $("wsDot"), wl = $("wsLabel"), rd = $("restDot"), rl = $("restLabel");
-  wd.className = "dot " + (state.wsOk ? "ok" : "err");
-  wl.textContent = state.wsOk ? "WS tick stream live" : "WS down — using state.json price";
+  const FEED_LABEL = {
+    "gate-ws": "Gate WS tick stream LIVE",
+    "coingecko": "CoinGecko REST every 10s",
+    "state": "state.json (5-min context)",
+    "none": "no feed yet"
+  };
+  const wd = $("wsDot"), wl = $("wsLabel");
+  const live = state.feed === "gate-ws";
+  wd.className = "dot " + (state.feed === "none" ? "warn" : (live ? "ok" : "warn"));
+  wl.textContent = FEED_LABEL[state.feed] || state.feed;
+  const rd = $("restDot"), rl = $("restLabel");
   const stale = state.stateTs !== null && (Date.now() - state.stateTs) > STATE_MAX_AGE;
   rd.className = "dot " + (state.stateOk ? (stale ? "warn" : "ok") : "err");
   rl.textContent = state.stateOk ? "context " + (stale ? "STALE" : "OK") + " (5-min refresh)" : "context failing";
@@ -387,5 +449,5 @@ function setFeedUi() {
   setInterval(() => { renderPrice(); setFeedUi(); }, 1000);
   setInterval(() => { $("utcClock").textContent = new Date().toISOString().slice(11, 19) + "Z"; }, 1000);
   setInterval(() => { if (state.last !== null) evaluate(); }, 2000);
-  log("monitor started — tick stream (Gate.io WS) + context state (5-min refresh)", "ok");
+  log("monitor started — feeds: Gate WS -> CoinGecko REST -> state.json", "ok");
 })();
