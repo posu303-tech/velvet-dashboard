@@ -1,12 +1,9 @@
 "use strict";
 
-const GATE_TICKER = "https://api.gateio.ws/api/v4/spot/tickers?currency_pair=VELVET_USDT";
-const GATE_CANDLES = "https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=VELVET_USDT";
 const GATE_WS = "wss://api.gateio.ws/ws/v4/";
-const MEXC_BOOK = "https://api.mexc.com/api/v3/ticker/bookTicker?symbol=VELVETUSDT";
 const PAIR = "VELVET_USDT";
-const DAY = 86400;
-const DAY_MS = DAY * 1000;
+const STATE_URL = "data/state.json";
+const STATE_MAX_AGE = 15 * 60 * 1000;
 
 const BRIEF_VWAP = 0.5275;
 const PRIOR_CLOSE = 0.5771;
@@ -80,11 +77,11 @@ const SETUPS = [
 ];
 
 const state = {
-  last: null, bid: null, ask: null, change24: null, wsOk: false, restOk: false,
+  last: null, bid: null, ask: null, change24: null, wsOk: false, stateOk: false,
   sesOpen: null, sesHigh: null, sesLow: null, vwap: null, sesVol: 0,
   priorClose: PRIOR_CLOSE, priorVwap: null, avgVol20: null,
   atrDaily: null, atr1h: null, last1hClose: null,
-  candles1m: [], lastUpdated: null, prevStatus: {}, fired: {}
+  candles1m: [], stateTs: null, lastUpdated: null, prevStatus: {}, fired: {}
 };
 
 const $ = (id) => document.getElementById(id);
@@ -115,107 +112,37 @@ function log(msg, cls) {
   while ($("log").children.length > 60) $("log").lastChild.remove();
 }
 
-async function jfetch(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error("HTTP " + r.status);
-  return r.json();
-}
-
-async function refreshTicker() {
+async function fetchState() {
   try {
-    const d = await jfetch(GATE_TICKER);
-    if (d && d[0]) {
-      state.last = parseFloat(d[0].last);
-      state.bid = parseFloat(d[0].highest_bid);
-      state.ask = parseFloat(d[0].lowest_ask);
-      state.change24 = parseFloat(d[0].change_percentage);
-      state.restOk = true;
+    const r = await fetch(STATE_URL + "?v=" + Date.now());
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    if (!d || !d.ts) throw new Error("bad payload");
+    state.stateTs = d.ts * 1000;
+    state.sesOpen = d.session && d.session.open;
+    state.sesHigh = d.session && d.session.high;
+    state.sesLow = d.session && d.session.low;
+    state.vwap = d.session && d.session.vwap;
+    state.sesVol = d.session ? d.session.vol : 0;
+    if (d.prior) {
+      state.priorClose = d.prior.close ?? state.priorClose;
+      state.priorVwap = d.prior.vwap;
     }
-  } catch (e) { state.restOk = false; }
-}
-
-async function refreshMexc() {
-  try {
-    const d = await jfetch(MEXC_BOOK);
-    state.bid = parseFloat(d.bidPrice);
-    state.ask = parseFloat(d.askPrice);
-  } catch (e) { /* keep gate bid/ask */ }
-}
-
-function gateCandles(interval, from, to, limit) {
-  let u = GATE_CANDLES + "&interval=" + interval;
-  if (from) u += "&from=" + from;
-  if (to) u += "&to=" + to;
-  if (limit) u += "&limit=" + limit;
-  return jfetch(u);
-}
-
-async function refreshContext() {
-  const now = Math.floor(Date.now() / 1000);
-  const dayStart = Math.floor(now / DAY) * DAY;
-  const prevStart = dayStart - DAY;
-  try {
-    const [m1, h48, d22] = await Promise.all([
-      gateCandles("1m", dayStart, now, null),
-      gateCandles("1h", prevStart, now, 60),
-      gateCandles("1d", null, null, 22)
-    ]);
-    const m1s = (m1 || []).map(c => ({ ts: +c[0], qv: +c[1], c: +c[2], h: +c[3], l: +c[4], o: +c[5], v: +c[6] }))
-      .filter(c => c.ts >= dayStart).sort((a, b) => a.ts - b.ts);
-    const h1s = (h48 || []).map(c => ({ ts: +c[0], c: +c[2], h: +c[3], l: +c[4], o: +c[5], v: +c[6] }))
-      .sort((a, b) => a.ts - b.ts);
-    const d1s = (d22 || []).map(c => ({ ts: +c[0], c: +c[2], h: +c[3], l: +c[4], o: +c[5], v: +c[6] }))
-      .sort((a, b) => a.ts - b.ts);
-
-    state.candles1m = m1s;
-    if (m1s.length) {
-      let pv = 0, tv = 0;
-      state.sesOpen = m1s[0].o;
-      state.sesHigh = Math.max(...m1s.map(c => c.h));
-      state.sesLow = Math.min(...m1s.map(c => c.l));
-      state.sesVol = m1s.reduce((a, c) => a + c.v, 0);
-      for (const c of m1s) { pv += ((c.h + c.l + c.c) / 3) * c.v; tv += c.v; }
-      state.vwap = tv > 0 ? pv / tv : null;
-    }
-    const yestH = h1s.filter(c => c.ts >= prevStart && c.ts < dayStart);
-    if (yestH.length) {
-      let pv = 0, tv = 0;
-      for (const c of yestH) { pv += ((c.h + c.l + c.c) / 3) * c.v; tv += c.v; }
-      state.priorVwap = tv > 0 ? pv / tv : null;
-    }
-    const closedH = h1s.filter(c => c.ts < now - 3600);
-    if (closedH.length) state.last1hClose = closedH[closedH.length - 1].c;
-
-    const prevDays = d1s.filter(c => c.ts < dayStart);
-    if (prevDays.length) state.priorClose = prevDays[prevDays.length - 1].c;
-    const last20 = prevDays.slice(-20);
-    if (last20.length === 20) state.avgVol20 = last20.reduce((a, c) => a + c.v, 0) / 20;
-
-    if (prevDays.length >= 15) {
-      const last15 = prevDays.slice(-15);
-      let trs = [];
-      for (let i = 0; i < last15.length; i++) {
-        const pc = i === 0 ? last15[0].o : last15[i - 1].c;
-        trs.push(Math.max(last15[i].h - last15[i].l, Math.abs(last15[i].h - pc), Math.abs(last15[i].l - pc)));
-      }
-      state.atrDaily = trs.reduce((a, b) => a + b, 0) / trs.length;
-    }
-    if (h1s.length >= 15) {
-      const last15 = h1s.slice(-15);
-      let trs = [];
-      for (let i = 0; i < last15.length; i++) {
-        const pc = i === 0 ? last15[0].o : last15[i - 1].c;
-        trs.push(Math.max(last15[i].h - last15[i].l, Math.abs(last15[i].h - pc), Math.abs(last15[i].l - pc)));
-      }
-      state.atr1h = trs.reduce((a, b) => a + b, 0) / trs.length;
-    }
+    state.avgVol20 = d.avgVol20;
+    state.atrDaily = d.atrDaily;
+    state.atr1h = d.atr1h;
+    state.last1hClose = d.last1hClose;
+    if (Array.isArray(d.spark)) state.candles1m = d.spark;
+    state.stateOk = true;
     state.lastUpdated = new Date();
-  } catch (e) { log("context refresh failed: " + e.message, "ev"); }
+  } catch (e) {
+    state.stateOk = false;
+    log("state refresh failed: " + e.message, "ev");
+  }
 }
 
 function progressFor(setup, distPct) {
-  const w = 5;
-  return clamp((w - distPct) / w, 0, 1) * 100;
+  return clamp((5 - distPct) / 5, 0, 1) * 100;
 }
 
 function evaluate() {
@@ -243,11 +170,11 @@ function fireTrigger(setup) {
   state.fired[key] = true;
   const dirTxt = setup.dir === "LONG" ? "LONG" : "SHORT";
   log("TRIGGER FIRED — Setup " + setup.id + " " + setup.name + " (" + dirTxt + ") @ " + fmt(state.last), "ok");
-  log("Levels — entry zone reached; stop " + fmt(setup.stop) + " | T1 " + fmt(setup.t1) + " | T2 " + fmt(setup.t2), "ev");
+  log("Levels — stop " + fmt(setup.stop) + " | T1 " + fmt(setup.t1) + " | T2 " + fmt(setup.t2), "ev");
   const banner = $("triggerBanner");
   banner.classList.remove("hidden");
   banner.classList.toggle("down", setup.dir !== "LONG");
-  banner.textContent = "TRIGGER — Setup " + setup.id + ": " + setup.name + " VALIDATED @ " + fmt(state.last) + " — enter zone reached";
+  banner.textContent = "TRIGGER — Setup " + setup.id + ": " + setup.name + " VALIDATED @ " + fmt(state.last) + " — entry zone reached";
   setTimeout(() => banner.classList.add("hidden"), 8000);
   beep(setup.dir === "LONG" ? 880 : 660);
   setTimeout(() => beep(setup.dir === "LONG" ? 1320 : 440), 250);
@@ -293,7 +220,7 @@ function renderPrice() {
   $("avgVol").textContent = fmtBig(state.avgVol20);
   $("volRatio").textContent = state.avgVol20 ? (state.sesVol / state.avgVol20).toFixed(2) + "x" : "--";
   $("atr").textContent = fmt(state.atrDaily) + " / " + fmt(state.atr1h);
-  $("lastUpdate").textContent = state.lastUpdated ? state.lastUpdated.toISOString().slice(11, 19) + "Z" : "--";
+  $("lastUpdate").textContent = state.lastUpdated ? state.lastUpdated.toISOString().slice(11, 19) + "Z (ctx " + (state.stateTs ? state.stateTs.toISOString().slice(11, 19) + "Z" : "--") + ")" : "--";
   $("utcClock").textContent = new Date().toISOString().slice(11, 19) + "Z";
   $("sessionDate").textContent = new Date().toISOString().slice(0, 10);
   renderLevels();
@@ -323,15 +250,15 @@ function drawSpark() {
   ctx.clearRect(0, 0, W, H);
   const cs = state.candles1m;
   if (cs.length < 2) return;
-  const prices = cs.map(c => c.c);
-  const min = Math.min(...prices, ...(state.vwap ? [state.vwap] : []), 0.4284, 0.4812) * 0.995;
-  const max = Math.max(...prices, ...(state.vwap ? [state.vwap] : []), 0.5771) * 1.005;
+  const prices = cs.map(c => c[1]);
+  const min = Math.min(...prices, state.vwap || 1, 0.4284, 0.4812) * 0.995;
+  const max = Math.max(...prices, state.vwap || 0, 0.5771) * 1.005;
   const X = (i) => (i / (cs.length - 1)) * W;
   const Y = (p) => H - ((p - min) / (max - min)) * H;
   ctx.strokeStyle = "#2ecc8f";
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  cs.forEach((c, i) => i === 0 ? ctx.moveTo(X(i), Y(c.c)) : ctx.lineTo(X(i), Y(c.c)));
+  cs.forEach((c, i) => i === 0 ? ctx.moveTo(X(i), Y(c[1])) : ctx.lineTo(X(i), Y(c[1])));
   ctx.stroke();
   const hLines = [
     [state.vwap, "#42c6e8"], [0.5771, "#f5b83d"], [0.4812, "#ff5c6c"], [0.4284, "#ff5c6c"]
@@ -444,23 +371,21 @@ $("notifBtn").addEventListener("click", () => {
 function setFeedUi() {
   const wd = $("wsDot"), wl = $("wsLabel"), rd = $("restDot"), rl = $("restLabel");
   wd.className = "dot " + (state.wsOk ? "ok" : "err");
-  wl.textContent = state.wsOk ? "WS live (tick stream)" : "WS down — REST fallback";
-  rd.className = "dot " + (state.restOk ? "ok" : "err");
-  rl.textContent = state.restOk ? "REST polling 1s" : "REST failing";
+  wl.textContent = state.wsOk ? "WS tick stream live" : "WS down — using state.json price";
+  const stale = state.stateTs !== null && (Date.now() - state.stateTs) > STATE_MAX_AGE;
+  rd.className = "dot " + (state.stateOk ? (stale ? "warn" : "ok") : "err");
+  rl.textContent = state.stateOk ? "context " + (stale ? "STALE" : "OK") + " (5-min refresh)" : "context failing";
 }
 
 (async function init() {
   buildSetups();
-  await refreshContext();
-  await refreshTicker();
+  await fetchState();
   evaluate();
   renderPrice();
   connectWS();
-  setInterval(refreshTicker, 1000);
-  setInterval(refreshMexc, 2000);
-  setInterval(refreshContext, 60000);
+  setInterval(fetchState, 60000);
   setInterval(() => { renderPrice(); setFeedUi(); }, 1000);
   setInterval(() => { $("utcClock").textContent = new Date().toISOString().slice(11, 19) + "Z"; }, 1000);
   setInterval(() => { if (state.last !== null) evaluate(); }, 2000);
-  log("monitor started — tick stream (Gate WS) + REST fallback (Gate/MEXC)", "ok");
+  log("monitor started — tick stream (Gate.io WS) + context state (5-min refresh)", "ok");
 })();

@@ -11,7 +11,7 @@
   <div class="brand">
     <h1>VELVET<span>-USD</span> Setup Monitor</h1>
     <div class="feed-status"><span id="wsDot" class="dot"></span><span id="wsLabel">WS connecting</span>
-    <span class="sep">|</span><span id="restDot" class="dot"></span><span id="restLabel">REST polling</span></div>
+    <span class="sep">|</span><span id="restDot" class="dot"></span><span id="restLabel">context state loading</span></div>
   </div>
   <div class="price-block">
     <div id="lastPrice" class="last-price">--</div>
@@ -27,18 +27,18 @@
 
 <main class="grid">
   <section class="card panel-price">
-    <h2>Session <span class="live-tag">LIVE</span></h2>
+    <h2>Session <span class="live-tag">5m ctx</span></h2>
     <canvas id="spark" width="620" height="180"></canvas>
     <table class="kv">
       <tr><td>Session open</td><td id="sOpen" class="num">--</td></tr>
       <tr><td>Session high / low</td><td id="sHighLow" class="num">--</td></tr>
-      <tr><td>Session VWAP <span class="live-tag">live</span></td><td id="sVwap" class="num">--</td></tr>
+      <tr><td>Session VWAP <span class="live-tag">5m</span></td><td id="sVwap" class="num">--</td></tr>
       <tr><td>Prior close (Aug 17)</td><td id="pClose" class="num">--</td></tr>
-      <tr><td>Prior-day VWAP <span class="live-tag">live</span></td><td id="pVwap" class="num">--</td></tr>
+      <tr><td>Prior-day VWAP <span class="live-tag">5m</span></td><td id="pVwap" class="num">--</td></tr>
       <tr><td>Session vol vs 20d avg</td><td id="volRatio" class="num">--</td></tr>
       <tr><td>20d avg volume (base)</td><td id="avgVol" class="num">--</td></tr>
       <tr><td>Session volume (base)</td><td id="sesVol" class="num">--</td></tr>
-      <tr><td>ATR14 daily / 1h <span class="live-tag">live</span></td><td id="atr" class="num">--</td></tr>
+      <tr><td>ATR14 daily / 1h <span class="live-tag">5m</span></td><td id="atr" class="num">--</td></tr>
       <tr><td>Last update</td><td id="lastUpdate" class="num">--</td></tr>
     </table>
     <button id="notifBtn" class="btn">Enable browser alerts</button>

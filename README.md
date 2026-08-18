@@ -2,11 +2,11 @@
 
 Live monitoring dashboard for the VELVET-USD pre-market trade setups (brief dated 2026-08-18). Fetches live market data, validates setup parameters tick-by-tick, and fires a trigger when a setup is validated. Shows how far each parameter is from its desired setup state.
 
-## Data sources (public, no API key)
+## Data sources (public, no API key, no CORS issues)
 
-- **Primary tick stream:** Gate.io WebSocket `spot.tickers` (VELVET_USDT) — updates on every trade
-- **REST fallback / cross-check:** Gate.io spot ticker + MEXC bookTicker, polled every 1–2s
-- **Candles (session VWAP, prior-day VWAP, ATR14, volume ratios):** Gate.io spot candlesticks (1m / 1h / 1d), re-fetched every 60s
+- **Primary tick stream:** Gate.io WebSocket `spot.tickers` (VELVET_USDT) — updates on every trade, direct browser → exchange (WebSockets are not subject to CORS)
+- **Candle-derived context (session VWAP, prior-day VWAP, ATR14, volume ratios):** computed by a GitHub Actions workflow every 5 minutes (`scripts/update-data.mjs`) and committed to `data/state.json` on the same origin as the page — the browser just fetches the JSON, so no CORS proxy is needed
+- Gate.io / MEXC REST endpoints do not send CORS headers, which is why they are not called from the page itself
 
 ## Live-computed parameters
 
@@ -39,7 +39,7 @@ Trigger state is edge-detected (fires once per setup per state change, not conti
 
 ## Deploy
 
-Static site — deploy to any static host (GitHub Pages used here).
+Static site — deploy to any static host (GitHub Pages used here). The context-data pipeline is a scheduled GitHub Actions workflow (`update-data.yml`, cron `*/5 * * * *`, plus `workflow_dispatch`); the first state.json is committed in the repo so the page works immediately.
 
 ```sh
 git init && git add -A && git commit -m "init"
