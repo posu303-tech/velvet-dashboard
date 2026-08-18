@@ -79,7 +79,7 @@ const SETUPS = [
 
 const state = {
   last: null, bid: null, ask: null, change24: null,
-  feed: "none", wsFails: 0, cgOk: false,
+  feed: "none", wsFails: 0, cgActive: false,
   sesOpen: null, sesHigh: null, sesLow: null, vwap: null, sesVol: 0,
   priorClose: PRIOR_CLOSE, priorVwap: null, avgVol20: null,
   atrDaily: null, atr1h: null, last1hClose: null,
@@ -163,16 +163,18 @@ async function pollCoinGecko() {
     log("coingecko poll failed: " + e.message + " (retry in " + cgBackoff / 1000 + "s)", "ev");
     if (state.feed === "coingecko") setFeed("state", "coingecko failing — state.json price");
   }
-  if (state.feed === "coingecko") {
+  if (state.cgActive) {
     cgTimer = setTimeout(pollCoinGecko, cgBackoff);
   }
 }
 function startCoinGecko() {
-  if (cgTimer) return;
+  if (state.cgActive) return;
+  state.cgActive = true;
   log("gate WS unavailable — switching to CoinGecko REST (10s)", "ev");
   pollCoinGecko();
 }
 function stopCoinGecko() {
+  state.cgActive = false;
   if (cgTimer) { clearTimeout(cgTimer); cgTimer = null; }
 }
 
@@ -211,7 +213,7 @@ function connectWS() {
       }
     };
     ws.onclose = () => {
-      if (state.feed === "gate-ws" || state.feed === "none") state.wsFails++;
+      if (!state.cgActive) state.wsFails++;
       if (state.wsFails >= 3) startCoinGecko();
       setTimeout(open, 3000);
     };
