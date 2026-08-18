@@ -211,7 +211,7 @@ function connectWS() {
       }
     };
     ws.onclose = () => {
-      if (state.feed === "gate-ws") state.wsFails++;
+      if (state.feed === "gate-ws" || state.feed === "none") state.wsFails++;
       if (state.wsFails >= 3) startCoinGecko();
       setTimeout(open, 3000);
     };
